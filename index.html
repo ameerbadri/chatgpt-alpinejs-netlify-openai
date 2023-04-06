@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ChatGPT via Netlify Edge Functions</title>
+    <link rel="icon" type="image/svg" href="/icon.svg" />
+
+    <!-- Styles for the chat app -->
+    <style>
+      #app {
+        font-family: "Avenir", Helvetica, Arial, sans-serif;
+        text-align: center;
+        color: #2c3e50;
+        margin-top: 60px;
+      }
+
+      .chat-container {
+        display: flex;
+        flex-direction: column;
+        max-width: 800px;
+        margin: 0 auto;
+        height: 600px;
+        border: 1px solid #ccc;
+        padding: 10px;
+      }
+
+      .chat-messages-wrapper {
+        flex-grow: 1;
+        display: flex;
+        flex-direction: column;
+        overflow-y: scroll;
+      }
+
+      .chat-messages {
+        flex-grow: 1;
+        margin-bottom: 10px;
+        border: 1px solid #ccc;
+        scroll-behavior: auto;
+      }
+
+      .chat-form {
+        position: relative;
+      }
+
+      .chat-input {
+        display: flex;
+        width: 100%;
+      }
+
+      form {
+        display: flex;
+        justify-content: space-between;
+        width: 100%;
+      }
+
+      input {
+        flex-grow: 1;
+        padding: 10px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        margin-right: 10px;
+      }
+
+      button {
+        padding: 10px;
+        background-color: #42b983;
+        border: none;
+        border-radius: 4px;
+        color: white;
+        cursor: pointer;
+      }
+
+      button:hover {
+        background-color: #2c3e50;
+      }
+
+      .right-aligned-text {
+        text-align: right;
+      }
+
+      .message {
+        display: inline;
+        text-align: left;
+      }
+
+      .message.user {
+        display: block;
+        text-align: right;
+        background-color: #f1f1f1;
+        padding: 10px;
+        margin-bottom: 10px;
+        border-radius: 4px;
+      }
+
+      .ai {
+        text-align: left;
+      }
+    </style>
+    <!-- Import Alpine.js from CDN -->
+    <script
+      defer
+      src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"
+    ></script>
+  </head>
+
+  <body>
+    <!-- Chat app container with Alpine.js data object -->
+    <div x-data="app()" class="app">
+      <!-- Container for chat messages -->
+      <div class="chat-container">
+        <h1 style="text-align: center;">ChatGPT via Netlify Edge Functions</h1>
+        <h4>
+          Flow: Client(Alpine.js)->Netlify Edge Functions->OpenAI Chat
+          Completion API(GPT3.5) [Streaming]
+        </h4>
+        <!-- Checkbox for enabling or disabling streaming response -->
+        <label for="stream">
+          Stream Response
+          <input type="checkbox" id="stream" x-model="isChecked" />
+        </label>
+        <div class="chat-messages-wrapper">
+          <div class="chat-messages">
+            <!-- Display user message -->
+            <template x-if="messageType === 'user'">
+              <p x-text="message" class="message user right-aligned-text"></p>
+            </template>
+
+            <!-- Display AI response -->
+            <div x-ref="chatRepsonsecomponent" :class="['message', 'ai']">
+              <p x-html="chatResponse"></p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Chat input form -->
+        <div class="chat-form">
+          <div class="chat-input">
+            <form @submit.prevent="sendMessage">
+              <input
+                type="text"
+                x-model="userMessage"
+                placeholder="Type your message..."
+              />
+              <button type="submit">Send</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      function app() {
+        return {
+          isChecked: true, // Determines if streaming is enabled
+          userMessage: "", // Input field for user message
+          message: "", // User message displayed in the chat
+          messageType: "", // Type of message, 'user' for user messages
+          chatResponse: "", // AI response displayed in the chat
+
+          // Function to send user message and receive AI response
+          async sendMessage() {
+            // Ignore empty messages
+            if (!this.userMessage.trim()) return;
+
+            // Set message and messageType for displaying in chat
+            this.message = this.userMessage;
+            this.messageType = "user";
+            this.userMessage = "";
+            this.chatResponse = "";
+
+            // Create URL for the streaming edge function
+            const urlObject = new URL(document.URL);
+            const apiUrl =
+              urlObject.protocol + "//" + urlObject.host + "/streaming";
+            console.log(apiUrl);
+            // Make request to Streaming Edge Function
+            try {
+              const response = await fetch(apiUrl, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  message: this.message,
+                  stream: this.isChecked,
+                }),
+              });
+
+              // Handle errors
+              if (!response.body) {
+                throw new Error(
+                  `Request failed with status code ${response.status}`
+                );
+              }
+
+              const reader = response.body.getReader();
+              const decoder = new TextDecoder("utf-8");
+
+              // Read and process the stream data
+              const readStream = async () => {
+                const { done, value } = await reader.read();
+                if (done) {
+                  console.log("All deltas received: DONE ");
+                  await console.log(this.chatResponse);
+                  return;
+                }
+                const value_text = decoder.decode(value);
+                // Find the returned "content" delta
+                const contentRegex = /"content":"(.*?)"/;
+                // RegEx newline indicator as a string
+                const nlRegex = /\\n/g;
+                const match = value_text.match(contentRegex);
+                if (match && match[1]) {
+                  // Replace newline indicator coming in as string with line break
+                  this.chatResponse =
+                    (await this.chatResponse) +
+                    match[1].replace(nlRegex, "<br/>");
+                }
+                // Update the UI using nextTick
+                await Alpine.nextTick(() => {
+                  this.$refs.chatRepsonsecomponent.scrollTop =
+                    this.$refs.chatRepsonsecomponent.scrollHeight;
+                });
+                readStream();
+              };
+              readStream();
+            } catch (error) {
+              console.error("error: " + error);
+            }
+          },
+        };
+      }
+    </script>
+  </body>
+</html>
